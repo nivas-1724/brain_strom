@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Dataset - don't upload training/testing images
+dataset/
+
+# Large model - GitHub limit is 100 MB
+backend/models/saved_models/resnet50.h5
+
+# Experiment/training output
+experiments/
+
+# Generated results
+results/
+test_results/
+
+# Logs
+*.log
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

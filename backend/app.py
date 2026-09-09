@@ -1,0 +1,266 @@
+"""
+Brain Tumor Detection — Research REST API
+Provides endpoints for MRI image classification, Multi-XAI, Calibration, Model Benchmarking, Error Analysis, and CSV Downloads.
+"""
+
+import os
+import sys
+import json
+import traceback
+import io
+
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
+from flask import Flask, request, jsonify, send_file, make_response
+from flask_cors import CORS
+from PIL import Image
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
+sys.path.insert(0, ROOT_DIR)
+sys.path.insert(0, os.path.join(ROOT_DIR, "model"))
+sys.path.insert(0, BASE_DIR)
+
+from model.predict import predict
+from report import generate_report
+
+app = Flask(__name__, static_folder="../frontend", static_url_path="")
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp", ".dcm"}
+MAX_FILE_SIZE_MB = 16
+
+
+def allowed_file(filename: str) -> bool:
+    return os.path.splitext(filename.lower())[1] in ALLOWED_EXTENSIONS
+
+
+def error_response(message: str, status: int = 400):
+    return jsonify({"success": False, "error": message}), status
+
+
+@app.route("/")
+def index():
+    return app.send_static_file("index.html")
+
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({
+        "success": True,
+        "status": "running",
+        "title": "Confidence-Calibrated, Robust and Explainable Multi-Model Brain MRI Classification",
+        "version": "2.0.0-research",
+    })
+
+
+@app.route("/api/predict", methods=["POST"])
+def api_predict():
+    if "image" not in request.files:
+        return error_response("No image file provided. Send as 'image' in multipart form.")
+
+    file = request.files["image"]
+    if file.filename == "":
+        return error_response("Empty filename.")
+
+    if not allowed_file(file.filename):
+        return error_response(f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+
+    file.seek(0, 2)
+    size_mb = file.tell() / (1024 * 1024)
+    file.seek(0)
+    if size_mb > MAX_FILE_SIZE_MB:
+        return error_response(f"File too large ({size_mb:.1f} MB). Max: {MAX_FILE_SIZE_MB} MB.")
+
+    try:
+        img_bytes = file.read()
+        pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as e:
+        return error_response(f"Could not open image: {str(e)}")
+
+    try:
+        result = predict(pil_img, file_bytes=img_bytes, filename=file.filename)
+        return jsonify({"success": True, **result})
+    except FileNotFoundError as e:
+        return error_response(str(e), 503)
+    except Exception as e:
+        traceback.print_exc()
+        return error_response(f"Prediction failed: {str(e)}", 500)
+
+
+@app.route("/api/report", methods=["POST"])
+def api_report():
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return error_response("Invalid JSON body.")
+
+    prediction_data = data.get("prediction_data")
+    patient_info = data.get("patient_info", {})
+
+    if not prediction_data:
+        return error_response("Missing 'prediction_data' in request body.")
+
+    try:
+        pdf_bytes = generate_report(prediction_data, patient_info)
+    except Exception as e:
+        traceback.print_exc()
+        return error_response(f"Report generation failed: {str(e)}", 500)
+
+    response = make_response(pdf_bytes)
+    response.headers["Content-Type"] = "application/pdf"
+    response.headers["Content-Disposition"] = 'attachment; filename="brain_mri_research_report.pdf"'
+    return response
+
+
+# ─────────────────────────────────────────────
+# EXPERIMENTAL RESEARCH API ENDPOINTS
+# ─────────────────────────────────────────────
+@app.route("/api/experiments/comparison", methods=["GET"])
+def get_model_comparison():
+    summary_path = os.path.join(ROOT_DIR, "results", "evaluation_summary.json")
+    if os.path.exists(summary_path):
+        with open(summary_path, "r") as f:
+            data = json.load(f)
+        return jsonify({"success": True, "comparison": data})
+    
+    # Run dynamic evaluation if json not created yet
+    try:
+        from experiments.evaluate_models import run_evaluation_experiment
+        data, _ = run_evaluation_experiment()
+        return jsonify({"success": True, "comparison": data})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/experiments/calibration", methods=["GET"])
+def get_calibration_results():
+    summary_path = os.path.join(ROOT_DIR, "results", "calibration_summary.json")
+    if os.path.exists(summary_path):
+        with open(summary_path, "r") as f:
+            data = json.load(f)
+        return jsonify({"success": True, "calibration": data})
+    
+    try:
+        from experiments.calibration_exp import run_calibration_experiment
+        data = run_calibration_experiment()
+        return jsonify({"success": True, "calibration": data})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/experiments/robustness", methods=["GET"])
+def get_robustness_results():
+    summary_path = os.path.join(ROOT_DIR, "results", "robustness_summary.json")
+    if os.path.exists(summary_path):
+        with open(summary_path, "r") as f:
+            data = json.load(f)
+        return jsonify({"success": True, "robustness": data})
+
+    try:
+        from experiments.robustness_exp import run_robustness_experiment
+        data = run_robustness_experiment()
+        return jsonify({"success": True, "robustness": data})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/experiments/error-analysis", methods=["GET"])
+def get_error_analysis():
+    summary_path = os.path.join(ROOT_DIR, "results", "error_analysis_summary.json")
+    if os.path.exists(summary_path):
+        with open(summary_path, "r") as f:
+            data = json.load(f)
+        return jsonify({"success": True, "error_analysis": data})
+
+    try:
+        from experiments.error_analysis import run_error_analysis
+        data = run_error_analysis()
+        return jsonify({"success": True, "error_analysis": data})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/experiments/ablation", methods=["GET"])
+def get_ablation_study():
+    summary_path = os.path.join(ROOT_DIR, "results", "ablation_summary.json")
+    if os.path.exists(summary_path):
+        with open(summary_path, "r") as f:
+            data = json.load(f)
+        return jsonify({"success": True, "ablation": data})
+
+    try:
+        from experiments.ablation_exp import run_ablation_study
+        data = run_ablation_study()
+        return jsonify({"success": True, "ablation": data})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/results/csv/<filename>", methods=["GET"])
+def download_csv(filename):
+    allowed_csvs = {
+        "model_comparison.csv",
+        "calibration_results.csv",
+        "robustness_results.csv",
+        "ablation_results.csv",
+        "misclassification_results.csv",
+        "prediction_results.csv",
+    }
+    if filename not in allowed_csvs:
+        return error_response("CSV file not found or disallowed.")
+
+    csv_path = os.path.join(ROOT_DIR, "results", "csv", filename)
+    if not os.path.exists(csv_path):
+        return error_response(f"File {filename} has not been generated yet.", 404)
+
+    return send_file(csv_path, as_attachment=True, download_name=filename, mimetype="text/csv")
+
+
+@app.route("/api/samples", methods=["GET"])
+def api_samples():
+    import base64
+    dataset_dir = os.path.join(ROOT_DIR, "dataset")
+    classes = ["glioma", "meningioma", "notumor", "pituitary"]
+    samples = {}
+
+    for cls in classes:
+        img_path = None
+        for split in ["Testing", "Training"]:
+            cls_dir = os.path.join(dataset_dir, split, cls)
+            if os.path.isdir(cls_dir):
+                files = [f for f in os.listdir(cls_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))]
+                if files:
+                    img_path = os.path.join(cls_dir, sorted(files)[0])
+                    break
+        
+        if img_path and os.path.exists(img_path):
+            try:
+                with open(img_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                ext = os.path.splitext(img_path)[1].lower().replace('.', '')
+                mime = 'png' if ext == 'png' else 'jpeg'
+                samples[cls] = {
+                    "class": cls,
+                    "filename": os.path.basename(img_path),
+                    "data_url": f"data:image/{mime};base64,{b64}",
+                }
+            except Exception:
+                samples[cls] = None
+        else:
+            samples[cls] = None
+
+    return jsonify({"success": True, "samples": samples})
+
+
+if __name__ == "__main__":
+    print("=" * 65)
+    print(" 🧠 NeuroScan AI — Research Platform Server")
+    print("    Framework: Confidence-Calibrated, Robust and Explainable Multi-Model Brain MRI Classification")
+    print("=" * 65)
+    print(" URL  : http://localhost:5000")
+    print(" API  : http://localhost:5000/api/predict")
+    print("=" * 65)
+    app.run(host="0.0.0.0", port=5000, debug=False)
