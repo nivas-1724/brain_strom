@@ -11,3 +11,4 @@ reportlab>=4.0.0
 scipy>=1.11.0
 tqdm>=4.65.0
 kaggle>=1.5.16
+gunicorn
